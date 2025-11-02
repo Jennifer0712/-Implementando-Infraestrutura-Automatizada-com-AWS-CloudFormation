@@ -1,0 +1,133 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: |
+  Stack Completa: Provisiona um Application Load Balancer (ALB)
+  e um Auto Scaling Group (ASG) de instâncias EC2 com
+  um servidor web Apache simples. (Cenário: Hotelaria)
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: (IMPORTANTE) Selecione a sua VPC Padrão (Default VPC).
+
+  VpcSubnets:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: (IMPORTANTE) Selecione PELO MENOS DUAS sub-redes públicas da sua VPC Padrão.
+  
+  AmiId:
+    Type: String
+    Description: ID da AMI Amazon Linux 2
+    Default: ami-0bdd88bd06d16ba03
+  
+  InstanceType:
+    Type: String
+    Description: Tipo da instância EC2
+    Default: t2.micro
+
+  SshCidrIp:
+    Type: String
+    Description: O IP (CIDR) que pode acessar as instâncias via SSH
+    Default: 0.0.0.0/0
+
+Resources:
+  # --- 1. Grupos de Segurança (Firewall) ---
+
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+
+      GroupDescription: Allows HTTP traffic (port 80) from the world
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+
+      GroupDescription: Allows traffic from LB (port 80) and SSH
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref SshCidrIp
+
+  # --- 2. Load Balancer (Porta de Entrada) ---
+
+  AppLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: hotelaria-app-lb
+      Subnets: !Ref VpcSubnets
+      SecurityGroups:
+        - !Ref LoadBalancerSecurityGroup
+
+  AppTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: hotelaria-app-tg
+      Port: 80
+      Protocol: HTTP
+      VpcId: !Ref VpcId
+      HealthCheckPath: /
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+
+  AppListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref AppLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref AppTargetGroup
+
+  # --- 3. Servidores (EC2) e Auto Scaling ---
+
+  AppLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: hotelaria-app-lt
+      LaunchTemplateData:
+        ImageId: !Ref AmiId
+        InstanceType: !Ref InstanceType
+        SecurityGroupIds:
+          - !Ref AppSecurityGroup
+        UserData:
+          Fn::Base64: |
+            #!/bin/bash
+            yum update -y
+            yum install -y httpd
+            systemctl start httpd
+            systemctl enable httpd
+            echo "<h1>Servidor Web (Hotelaria) - Automatizado via CloudFormation</h1>" > /var/www/html/index.html
+
+  AppAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: hotelaria-app-asg
+      VPCZoneIdentifier: !Ref VpcSubnets
+      LaunchTemplate:
+        LaunchTemplateId: !Ref AppLaunchTemplate
+        Version: !GetAtt AppLaunchTemplate.LatestVersionNumber
+      MinSize: '2' 
+      MaxSize: '4' 
+      DesiredCapacity: '2'
+      TargetGroupARNs:
+        - !Ref AppTargetGroup
+
+Outputs:
+  LoadBalancerDNS:
+    Description: O endereço (DNS) do Load Balancer
+    Value: !GetAtt AppLoadBalancer.DNSName
+    Export:
+      Name: HotelariaAppDNS
